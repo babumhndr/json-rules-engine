@@ -160,32 +160,28 @@ class Rule extends EventEmitter {
     return props
   }
 
-  /**
-   * Priorizes an array of conditions based on "priority"
-   *   When no explicit priority is provided on the condition itself, the condition's priority is determine by its fact
+   /**
+   * Prioritizes an array of conditions based on "priority"
+   * When no explicit priority is provided on the condition itself, the condition's priority is determined by its fact
    * @param  {Condition[]} conditions
    * @return {Condition[][]} prioritized two-dimensional array of conditions
-   *    Each outer array element represents a single priority(integer).  Inner array is
-   *    all conditions with that priority.
+   * Each outer array element represents a single priority (integer). Inner array is
+   * all conditions with that priority.
    */
   prioritizeConditions (conditions) {
     const factSets = conditions.reduce((sets, condition) => {
-      // if a priority has been set on this specific condition, honor that first
-      // otherwise, use the fact's priority
-      let priority = condition.priority
-      if (!priority) {
-        const fact = this.engine.getFact(condition.fact)
-        priority = (fact && fact.priority) || 1
+      let priority = condition.priority || 1;
+      if (condition.priority === undefined) {
+        const fact = this.engine.getFact(condition.fact);
+        if (fact && fact.priority) priority = fact.priority;
       }
-      if (!sets[priority]) sets[priority] = []
-      sets[priority].push(condition)
-      return sets
-    }, {})
+      if (!sets[priority]) sets[priority] = [];
+      sets[priority].push(condition);
+      return sets;
+    }, {});
     return Object.keys(factSets)
-      .sort((a, b) => {
-        return Number(a) > Number(b) ? -1 : 1 // order highest priority -> lowest
-      })
-      .map((priority) => factSets[priority])
+      .sort((a, b) => b - a) // order highest priority -> lowest
+      .map((priority) => factSets[priority]);
   }
 
   /**
@@ -254,59 +250,38 @@ class Rule extends EventEmitter {
       })
     }
 
-    /**
+     /**
      * Evaluates a set of conditions based on an 'all', 'any', or 'not' operator.
-     *   First, orders the top level conditions based on priority
-     *   Iterates over each priority set, evaluating each condition
-     *   If any condition results in the rule to be guaranteed truthy or falsey,
-     *   it will short-circuit and not bother evaluating any additional rules
+     * First, orders the top level conditions based on priority
+     * Iterates over each priority set, evaluating each condition
+     * If any condition results in the rule to be guaranteed truthy or falsey,
+     * it will short-circuit and not bother evaluating any additional rules
      * @param  {Condition[]} conditions - conditions to be evaluated
      * @param  {string('all'|'any'|'not')} operator
      * @return {Promise(boolean)} rule evaluation result
      */
-    const prioritizeAndRun = (conditions, operator) => {
-      if (conditions.length === 0) {
-        return Promise.resolve(true)
-      }
-      if (conditions.length === 1) {
-        // no prioritizing is necessary, just evaluate the single condition
-        // 'all' and 'any' will give the same results with a single condition so no method is necessary
-        // this also covers the 'not' case which should only ever have a single condition
-        return evaluateCondition(conditions[0])
-      }
-      let method = Array.prototype.some
-      if (operator === 'all') {
-        method = Array.prototype.every
-      }
-      const orderedSets = this.prioritizeConditions(conditions)
-      let cursor = Promise.resolve()
-      // use for() loop over Array.forEach to support IE8 without polyfill
-      for (let i = 0; i < orderedSets.length; i++) {
-        const set = orderedSets[i]
-        let stop = false
-        cursor = cursor.then((setResult) => {
-          // after the first set succeeds, don't fire off the remaining promises
-          if ((operator === 'any' && setResult === true) || stop) {
-            debug(
-              'prioritizeAndRun::detected truthy result; skipping remaining conditions'
-            )
-            stop = true
-            return true
-          }
-
-          // after the first set fails, don't fire off the remaining promises
-          if ((operator === 'all' && setResult === false) || stop) {
-            debug(
-              'prioritizeAndRun::detected falsey result; skipping remaining conditions'
-            )
-            stop = true
-            return false
-          }
-          // all conditions passed; proceed with running next set in parallel
-          return evaluateConditions(set, method)
-        })
-      }
-      return cursor
+    prioritizeAndRun (conditions, operator) {
+      if (conditions.length === 0) return Promise.resolve(true);
+      if (conditions.length === 1) return this.evaluateCondition(conditions[0]);
+  
+      const method = operator === 'all' ? Array.prototype.every : Array.prototype.some;
+      const orderedSets = this.prioritizeConditions(conditions);
+  
+      let stop = false;
+      const cursor = orderedSets.reduce((promise, set) => {
+        return promise.then((setResult) => {
+          if (stop) return setResult;
+          return this.evaluateConditions(set, method).then((result) => {
+            if ((operator === 'any' && result === true) || (operator === 'all' && result === false)) {
+              stop = true;
+              return result;
+            }
+            return result;
+          });
+        });
+      }, Promise.resolve());
+  
+      return cursor;
     }
 
     /**
